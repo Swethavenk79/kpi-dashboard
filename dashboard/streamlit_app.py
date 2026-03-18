@@ -119,6 +119,9 @@ def generate_sample_data():
     # Save to file
     os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
     df.to_csv(DATA_PATH, index=False)
+    
+    # Return with proper datetime
+    df['date'] = pd.to_datetime(df['date'])
     return df
 
 @st.cache_data
@@ -126,7 +129,7 @@ def load_data():
     """Load weekly summary data."""
     if not os.path.exists(DATA_PATH):
         st.info("📊 Generating sample data for demo...")
-        return generate_sample_data()
+        generate_sample_data()
     
     df = pd.read_csv(DATA_PATH)
     df['date'] = pd.to_datetime(df['date'])
