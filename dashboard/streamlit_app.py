@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
 import sys
-import subprocess
+from datetime import datetime, timedelta
 
 # Page configuration
 st.set_page_config(
@@ -43,32 +43,94 @@ st.markdown("""
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 DATA_PATH = os.path.join(SCRIPT_DIR, 'data', 'weekly_summary.csv')
-ETL_PATH = os.path.join(PROJECT_DIR, 'scripts', 'etl.py')
+
+def generate_sample_data():
+    """Generate sample data for demo purposes."""
+    np.random.seed(42)
+    
+    REGIONS = ['North', 'South', 'East', 'West']
+    START_DATE = datetime(2024, 1, 1)
+    END_DATE = datetime(2024, 12, 31)
+    
+    # Generate weeks
+    weeks = []
+    current = START_DATE
+    while current <= END_DATE:
+        weeks.append(current)
+        current += timedelta(days=7)
+    
+    # Generate sample data
+    records = []
+    for week_idx, week_start in enumerate(weeks):
+        quarter = (week_start.month - 1) // 3 + 1
+        
+        for region in REGIONS:
+            base_revenue = {'North': 50000, 'South': 45000, 'East': 48000, 'West': 52000}[region]
+            
+            # Seasonality
+            seasonality = 1.0
+            if quarter == 4:
+                seasonality = 1.3
+            elif quarter == 2:
+                seasonality = 0.85
+            
+            # South underperforms starting Q3
+            region_factor = 1.0
+            if region == 'South' and week_idx >= 26:
+                region_factor = 0.85
+            
+            revenue = base_revenue * seasonality * region_factor * np.random.uniform(0.9, 1.1)
+            units = int(revenue / 500)
+            returns = int(units * 0.04)
+            staff_hours = 320 * seasonality * np.random.uniform(0.9, 1.1)
+            
+            # Targets
+            base_target = {'North': 400000, 'South': 360000, 'East': 384000, 'West': 416000}[region]
+            quarter_lift = 1 + (quarter - 1) * 0.03
+            revenue_target = base_target * quarter_lift
+            units_target = int(revenue_target / 500)
+            
+            records.append({
+                'date': week_start.strftime('%Y-%m-%d'),
+                'region': region,
+                'revenue': round(revenue, 2),
+                'units_sold': units,
+                'returns': returns,
+                'staff_hours': round(staff_hours, 1),
+                'return_rate': round(returns / units * 100, 2) if units > 0 else 0,
+                'revenue_per_staff_hour': round(revenue / staff_hours, 2),
+                'revenue_target': round(revenue_target, 2),
+                'units_target': units_target,
+                'revenue_vs_target': round((revenue / revenue_target - 1) * 100, 2),
+                'units_vs_target': round((units / units_target - 1) * 100, 2),
+                'is_anomaly': False
+            })
+    
+    df = pd.DataFrame(records)
+    
+    # Flag anomalies (>2 std dev)
+    for region in REGIONS:
+        region_data = df[df['region'] == region]['revenue']
+        mean = region_data.mean()
+        std = region_data.std()
+        mask = (df['region'] == region) & (df['revenue'] > mean + 2 * std)
+        df.loc[mask, 'is_anomaly'] = True
+    
+    # Save to file
+    os.makedirs(os.path.dirname(DATA_PATH), exist_ok=True)
+    df.to_csv(DATA_PATH, index=False)
+    return df
 
 @st.cache_data
 def load_data():
     """Load weekly summary data."""
     if not os.path.exists(DATA_PATH):
-        st.error(f"Data file not found: {DATA_PATH}")
-        st.info("Please run: python scripts/etl.py")
-        return None
+        st.info("📊 Generating sample data for demo...")
+        return generate_sample_data()
     
     df = pd.read_csv(DATA_PATH)
     df['date'] = pd.to_datetime(df['date'])
     return df
-
-def run_etl():
-    """Rerun ETL pipeline."""
-    try:
-        result = subprocess.run([sys.executable, ETL_PATH], 
-                              capture_output=True, text=True, cwd=PROJECT_DIR)
-        if result.returncode == 0:
-            st.cache_data.clear()
-            return True, result.stdout
-        else:
-            return False, result.stderr
-    except Exception as e:
-        return False, str(e)
 
 def calculate_delta(df, metric, region_filter=None):
     """Calculate week-over-week delta for a metric."""
@@ -104,14 +166,11 @@ def main():
     with col_title:
         st.markdown(f"**Last updated:** {df['date'].max().strftime('%Y-%m-%d')}")
     with col_refresh:
-        if st.button("🔄 Refresh Data", type="primary", use_container_width=True):
-            with st.spinner("Running ETL pipeline..."):
-                success, output = run_etl()
-                if success:
-                    st.success("Data refreshed!")
-                    df = load_data()
-                else:
-                    st.error(f"ETL failed: {output}")
+        if st.button("🔄 Regenerate Data", type="primary", use_container_width=True):
+            st.cache_data.clear()
+            df = load_data()
+            st.success("Data refreshed!")
+            st.rerun()
     
     st.divider()
     
@@ -126,31 +185,23 @@ def main():
         default=all_regions
     )
     
-    # Date range slider
+    # Date range
     min_date = df['date'].min()
     max_date = df['date'].max()
     
-    # Convert to week numbers for slider
-    df['week_num'] = ((df['date'] - min_date).dt.days // 7)
-    max_week = df['week_num'].max()
-    
-    week_range = st.sidebar.slider(
-        "Date Range (Weeks)",
-        min_value=0,
-        max_value=int(max_week),
-        value=(0, int(max_week))
+    date_range = st.sidebar.date_input(
+        "Date Range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
     )
-    
-    start_date = min_date + pd.Timedelta(weeks=week_range[0])
-    end_date = min_date + pd.Timedelta(weeks=week_range[1])
-    st.sidebar.caption(f"From: {start_date.strftime('%Y-%m-%d')}  ")
-    st.sidebar.caption(f"To: {end_date.strftime('%Y-%m-%d')}")
     
     # Show targets toggle
     show_targets = st.sidebar.toggle("Show Targets", value=True)
     
     # Filter data
-    mask = (df['date'] >= start_date) & (df['date'] <= end_date)
+    start_date, end_date = date_range if len(date_range) == 2 else (min_date, max_date)
+    mask = (df['date'] >= pd.Timestamp(start_date)) & (df['date'] <= pd.Timestamp(end_date))
     if selected_regions:
         mask &= df['region'].isin(selected_regions)
     filtered_df = df[mask].copy()
@@ -383,5 +434,4 @@ def main():
         st.caption(f"Export includes {len(export_df)} rows matching current filters.")
 
 if __name__ == '__main__':
-    from datetime import datetime
     main()
